@@ -1,0 +1,10 @@
+{
+  "name": "World Map & Live Geolocation Explorer",
+  "description": "Interactive world map template featuring real-time user geolocation tracking, multi-layer cartography, coordinates HUD, and global navigation tools.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
