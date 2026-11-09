@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Search, X, User, Settings, TrendingUp, Wallet, ArrowUpRight, Copy, Check, Share2, Volume2, VolumeX, Mail, Lock, ShieldCheck, Eye, EyeOff, LogOut, Users, Briefcase, Loader2 } from 'lucide-react';
+import { auth, db, storage } from '../lib/firebase';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, setDoc, getDoc, collection, updateDoc, getDocs, query, where } from 'firebase/firestore';
 
 interface FeatureSearchBarProps {
   placeholder: string;
@@ -68,7 +71,7 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
   const [copied, setCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   
-  // Auth Form State
+  // Auth Form State - Default to signup screen when opening Sign In / Auth
   const [isSignup, setIsSignup] = useState(true);
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -79,26 +82,98 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [isError, setIsError] = useState(false);
 
-  const [currentUserData, setCurrentUserData] = useState<{ firstName: string; lastName: string; email: string } | null>(null);
+  const [currentUserData, setCurrentUserData] = useState<any | null>(null);
+  const [pendingApplications, setPendingApplications] = useState<any[]>([]);
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
 
+  const isReferrals = activeTab === 'referrals';
+  const isTenant = activeTab === 'tenant';
+  const isAuth = activeTab === 'auth';
+  const isProfile = activeTab === 'profile';
+  const isSeekers = activeTab === 'seekers';
+
+  // Ensure Signup screen is shown by default whenever Auth tab is opened
   useEffect(() => {
-    if (userEmail) {
-      const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-      const user = users.find((u: any) => u.email === userEmail);
-      if (user) {
-        setCurrentUserData({
-          firstName: user.firstName || '',
-          lastName: user.lastName || '',
-          email: user.email
-        });
-      }
-    } else {
-      setCurrentUserData(null);
+    if (activeTab === 'auth') {
+      setIsSignup(true);
+      setAuthMessage(null);
+      setIsError(false);
     }
-  }, [userEmail]);
+  }, [activeTab]);
+
+  // Load current user data from Firestore or Auth state
+  useEffect(() => {
+    async function fetchUserData() {
+      if (auth.currentUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
+          if (userDoc.exists()) {
+            setCurrentUserData(userDoc.data());
+          } else {
+            setCurrentUserData({ email: auth.currentUser.email });
+          }
+        } catch (err) {
+          console.error("Error fetching user data:", err);
+          setCurrentUserData({ email: auth.currentUser.email });
+        }
+      } else {
+        setCurrentUserData(null);
+      }
+    }
+    fetchUserData();
+  }, [userEmail, activeTab]);
+
+  const isTenantUser = (currentUserData && currentUserData.subscriptionType === 'tenant') || userEmail === 'timegig2026@gmail.com';
+  const userStatus = userEmail === 'timegig2026@gmail.com' ? 'active' : (currentUserData ? currentUserData.subscriptionStatus || 'none' : 'none');
+
+  // Load pending applications for Referrals tab
+  useEffect(() => {
+    async function fetchPendingApps() {
+      if (!isReferrals || !isTenantUser) return;
+      
+      try {
+        let q;
+        if (userEmail === 'timegig2026@gmail.com') {
+           q = query(collection(db, 'applications'), where('status', '==', 'pending'));
+        } else {
+           q = query(collection(db, 'applications'), where('status', '==', 'pending'), where('referrerEmail', '==', userEmail));
+        }
+        
+        const querySnapshot = await getDocs(q);
+        const apps = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setPendingApplications(apps);
+      } catch (err) {
+        console.error("Error fetching applications:", err);
+      }
+    }
+    fetchPendingApps();
+  }, [activeTab, isReferrals, isTenantUser, userEmail]);
 
   if (!activeTab || activeTab === 'gigs') return null;
+
+  const handleAppAction = async (appId: string, action: 'approved' | 'rejected') => {
+    playTabSound();
+    try {
+      await updateDoc(doc(db, 'applications', appId), { status: action });
+
+      const appDoc = await getDoc(doc(db, 'applications', appId));
+      if (appDoc.exists()) {
+        const targetEmail = appDoc.data().userEmail;
+        const q = query(collection(db, 'users'), where('email', '==', targetEmail));
+        const querySnapshot = await getDocs(q);
+        
+        querySnapshot.forEach(async (uDoc) => {
+          await updateDoc(uDoc.ref, {
+            subscriptionStatus: action === 'approved' ? 'active' : 'rejected',
+            hasSubscribed: action === 'approved'
+          });
+        });
+      }
+      setPendingApplications(prev => prev.filter(app => app.id !== appId));
+    } catch (err) {
+      console.error("Error updating app action:", err);
+    }
+  };
 
   const getPlaceholder = () => {
     if (activeTab === 'referrals') return "Search referrals by name or email...";
@@ -107,11 +182,6 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
   };
 
   const showSearchBar = activeTab === 'referrals' || activeTab === 'seekers';
-  const isProfile = activeTab === 'profile';
-  const isTenant = activeTab === 'tenant';
-  const isAuth = activeTab === 'auth';
-  const isReferrals = activeTab === 'referrals';
-  const isSeekers = activeTab === 'seekers';
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText('https://timegig.app/ref/TG9921');
@@ -119,94 +189,50 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleAuthSubmit = (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsError(false);
 
-    const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-    const MAIN_ACCOUNT = 'timegig2026@gmail.com';
-
-    if (isSignup) {
-      if (!acceptedTerms) {
-        setIsError(true);
-        setAuthMessage("Please accept the terms and conditions.");
-        return;
-      }
-      
-      const userExists = users.some((u: any) => u.email === email);
-      if (userExists) {
-        setIsError(true);
-        setAuthMessage("This email is already registered. Please log in.");
-        return;
-      }
-
-      const isMainAccount = email === MAIN_ACCOUNT;
-      const newUser = { 
-        firstName, 
-        lastName, 
-        email, 
-        password, 
-        hasSubscribed: isMainAccount, 
-        subscriptionStatus: isMainAccount ? 'active' : 'none',
-        subscriptionType: isMainAccount ? 'tenant' : null,
-        registrationDate: new Date().toISOString()
-      };
-
-      users.push(newUser);
-      localStorage.setItem('timegig_users', JSON.stringify(users));
-
-      setAuthMessage(`Congratulations! Your account (${email}) has been created.`);
-      setTimeout(() => {
-        setAuthMessage(null);
-        onAuthSuccess(email, isMainAccount ? 'gigs' : 'tenant');
-      }, 2000);
-    } else {
-      const user = users.find((u: any) => u.email === email && u.password === password);
-      if (!user) {
-        setIsError(true);
-        setAuthMessage("Invalid email or password.");
-        return;
-      }
-
-      setAuthMessage(`Welcome back, ${user.firstName || email}!`);
-      setTimeout(() => {
-        onAuthSuccess(email, null);
-        setAuthMessage(null);
-      }, 1500);
-    }
-  };
-
-  const handleAppAction = (appId: string, action: 'approved' | 'rejected') => {
-    playTabSound();
-    const apps = JSON.parse(localStorage.getItem('timegig_applications') || '[]');
-    const appIndex = apps.findIndex((a: any) => a.id === appId);
-    
-    if (appIndex !== -1) {
-      const targetEmail = apps[appIndex].userEmail;
-      apps[appIndex].status = action;
-      localStorage.setItem('timegig_applications', JSON.stringify(apps));
-
-      const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-      const userIdx = users.findIndex((u: any) => u.email === targetEmail);
-      if (userIdx !== -1) {
-        users[userIdx].subscriptionStatus = action === 'approved' ? 'active' : 'rejected';
-        users[userIdx].hasSubscribed = action === 'approved';
-        localStorage.setItem('timegig_users', JSON.stringify(users));
-        
-        // Refresh local view if we are looking at our own list (unlikely in this UI but good practice)
-        if (targetEmail === userEmail) {
-           setCurrentUserData({ ...users[userIdx] });
+    try {
+      if (isSignup) {
+        if (!acceptedTerms) {
+          setIsError(true);
+          setAuthMessage("Please accept the terms and conditions.");
+          return;
         }
+
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
+        const isMainAccount = email === 'timegig2026@gmail.com';
+
+        await setDoc(doc(db, 'users', user.uid), {
+          firstName,
+          lastName,
+          email,
+          hasSubscribed: isMainAccount,
+          subscriptionStatus: isMainAccount ? 'active' : 'none',
+          subscriptionType: isMainAccount ? 'tenant' : null,
+          registrationDate: new Date().toISOString()
+        });
+
+        setAuthMessage(`Congratulations! Your account (${email}) has been created.`);
+        setTimeout(() => {
+          setAuthMessage(null);
+          onAuthSuccess(email, isMainAccount ? 'gigs' : 'tenant');
+        }, 2000);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+        setAuthMessage(`Welcome back!`);
+        setTimeout(() => {
+          onAuthSuccess(email, null);
+          setAuthMessage(null);
+        }, 1500);
       }
-      
-      // Force component to re-render to update the list
-      setCurrentUserData(prev => prev ? { ...prev } : null);
+    } catch (error: any) {
+      setIsError(true);
+      setAuthMessage(error.message || "Authentication failed.");
     }
   };
-
-  const isTenantUser = (currentUserData && (currentUserData as any).subscriptionType === 'tenant') || userEmail === 'timegig2026@gmail.com';
-  const userStatus = userEmail === 'timegig2026@gmail.com' ? 'active' : (currentUserData ? (currentUserData as any).subscriptionStatus : 'none');
-  const showCloseButton = !isLoggedIn || userStatus === 'active';
 
   return (
     <div className="absolute inset-0 z-40 flex flex-col bg-slate-950/20 backdrop-blur-xl animate-fade-in pointer-events-none">
@@ -268,14 +294,19 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
         
         <div className="flex-1 flex flex-col items-center justify-center pointer-events-auto pt-16 pb-20">
              
+             {/* PROFILE TAB */}
              {isProfile && (
                <div className="flex flex-col items-center text-center space-y-6">
-                 <div className="w-40 h-40 rounded-full bg-gradient-to-tr from-cyan-500 via-sky-500 to-blue-600 flex items-center justify-center shadow-2xl ring-4 ring-white/20">
-                   <User className="w-20 h-20 text-white" />
+                 <div className="w-40 h-40 rounded-full bg-gradient-to-tr from-cyan-500 via-sky-500 to-blue-600 flex items-center justify-center shadow-2xl ring-4 ring-white/20 overflow-hidden">
+                   {currentUserData?.selfieUrl ? (
+                     <img src={currentUserData.selfieUrl} alt="Profile Logo" className="w-full h-full object-cover" />
+                   ) : (
+                     <User className="w-20 h-20 text-white" />
+                   )}
                  </div>
                  <div className="space-y-2 px-6">
                    <h1 className="text-3xl font-black text-slate-900 dark:text-white tracking-tight break-words">
-                     {currentUserData ? `${currentUserData.firstName} ${currentUserData.lastName}` : "Guest User"}
+                     {currentUserData ? `${currentUserData.firstName || ''} ${currentUserData.lastName || ''}`.trim() || userEmail : "Guest User"}
                    </h1>
                    <p className="text-sm text-slate-600 dark:text-slate-300 font-medium">
                      {currentUserData ? currentUserData.email : "Connect your account to start"}
@@ -296,6 +327,7 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                </div>
              )}
 
+             {/* TENANT TAB */}
              {isTenant && (
                <div className="w-full max-w-lg flex flex-col space-y-4 animate-fade-in px-6 max-h-full overflow-hidden">
                  {(userStatus === 'none' || userStatus === 'rejected') && (
@@ -326,20 +358,6 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                        <div className="p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
                           <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mb-1">Status</p>
                           <p className="text-amber-500 font-bold uppercase tracking-widest text-xs">Verification Pending</p>
-                       </div>
-                    </div>
-                 )}
-
-                 {userStatus === 'rejected' && (
-                    <div className="w-full flex flex-col items-center text-center space-y-6 py-6">
-                       <div className="w-24 h-24 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
-                          <X className="w-12 h-12 text-rose-500" />
-                       </div>
-                       <div className="space-y-2">
-                          <h2 className="text-2xl font-black text-white uppercase tracking-tight">Application Declined</h2>
-                          <p className="text-slate-400 text-sm leading-relaxed">
-                             Your documents were not approved. Please contact support.
-                          </p>
                        </div>
                     </div>
                  )}
@@ -409,6 +427,7 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                </div>
              )}
 
+             {/* REFERRALS TAB */}
              {isReferrals && (
                <div className="w-full max-w-xl px-6 space-y-4 animate-fade-in overflow-y-auto max-h-[75vh]">
                  <div className="flex items-center justify-between mb-2 px-2">
@@ -421,39 +440,39 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                  {isTenantUser ? (
                     <div className="space-y-4">
                        <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] px-2">Pending Applications</h3>
-                       {JSON.parse(localStorage.getItem('timegig_applications') || '[]')
-                          .filter((a: any) => a.status === 'pending' && (userEmail === 'timegig2026@gmail.com' || a.referrerEmail === userEmail))
-                          .length > 0 ? (
-                          JSON.parse(localStorage.getItem('timegig_applications') || '[]')
-                            .filter((a: any) => a.status === 'pending' && (userEmail === 'timegig2026@gmail.com' || a.referrerEmail === userEmail))
-                            .map((app: any) => (
-                              <div key={app.id} className="p-4 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md space-y-4">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-xs font-bold text-cyan-400">
-                                      {app.userName.charAt(0)}
-                                    </div>
-                                    <div>
-                                      <p className="text-sm font-bold text-white">{app.userName}</p>
-                                      <p className="text-[10px] text-slate-400 uppercase tracking-widest">{app.plan === 'tenant' ? 'Tenant Plan' : 'User Plan'}</p>
-                                    </div>
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-[10px] text-slate-500 font-mono">{app.id}</p>
-                                  </div>
-                                </div>
-                                <div className="grid grid-cols-3 gap-2">
-                                   <button onClick={() => { playTabSound(); setFullScreenImage('selfie'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-cyan-500 transition-colors">Selfie 📷</button>
-                                   <button onClick={() => { playTabSound(); setFullScreenImage('id'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-purple-500 transition-colors">ID Doc 📄</button>
-                                   <button onClick={() => { playTabSound(); setFullScreenImage('pop'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-emerald-500 transition-colors">PoP 💰</button>
-                                </div>
-                                <div className="flex gap-2">
-                                  <button onClick={() => handleAppAction(app.id, 'approved')} className="flex-1 py-2 rounded-xl bg-emerald-500 text-white font-bold text-[10px] uppercase tracking-widest hover:bg-emerald-400">Approve</button>
-                                  <button onClick={() => handleAppAction(app.id, 'rejected')} className="flex-1 py-2 rounded-xl bg-rose-500/20 text-rose-500 border border-rose-500/30 font-bold text-[10px] uppercase tracking-widest hover:bg-rose-500/30">Reject</button>
-                                </div>
-                              </div>
-                            ))
-                       ) : (
+                        {pendingApplications.length > 0 ? (
+                           pendingApplications.map((app: any) => (
+                             <div key={app.id} className="p-4 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md space-y-4">
+                               <div className="flex items-center justify-between">
+                                 <div className="flex items-center gap-3">
+                                   <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-xs font-bold text-cyan-400 overflow-hidden">
+                                     {app.selfieUrl ? (
+                                       <img src={app.selfieUrl} alt="Applicant Selfie" className="w-full h-full object-cover" />
+                                     ) : (
+                                       app.userName ? app.userName.charAt(0) : 'U'
+                                     )}
+                                   </div>
+                                   <div>
+                                     <p className="text-sm font-bold text-white">{app.userName}</p>
+                                     <p className="text-[10px] text-slate-400 uppercase tracking-widest">{app.plan === 'tenant' ? 'Tenant Plan' : 'User Plan'}</p>
+                                   </div>
+                                 </div>
+                                 <div className="text-right">
+                                   <p className="text-[10px] text-slate-500 font-mono">{app.id}</p>
+                                 </div>
+                               </div>
+                               <div className="grid grid-cols-3 gap-2">
+                                  <button onClick={() => { playTabSound(); setFullScreenImage(app.selfieUrl || 'selfie'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-cyan-500 transition-colors">Selfie 📷</button>
+                                  <button onClick={() => { playTabSound(); setFullScreenImage(app.idUrl || 'id'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-purple-500 transition-colors">ID Doc 📄</button>
+                                  <button onClick={() => { playTabSound(); setFullScreenImage(app.popUrl || 'pop'); }} className="p-2 rounded-xl bg-white/5 border border-white/10 text-[9px] text-center text-slate-400 hover:border-emerald-500 transition-colors">PoP 💰</button>
+                               </div>
+                               <div className="flex gap-2">
+                                 <button onClick={() => handleAppAction(app.id, 'approved')} className="flex-1 py-2 rounded-xl bg-emerald-500 text-white font-bold text-[10px] uppercase tracking-widest hover:bg-emerald-400">Approve</button>
+                                 <button onClick={() => handleAppAction(app.id, 'rejected')} className="flex-1 py-2 rounded-xl bg-rose-500/20 text-rose-500 border border-rose-500/30 font-bold text-[10px] uppercase tracking-widest hover:bg-rose-500/30">Reject</button>
+                               </div>
+                             </div>
+                           ))
+                        ) : (
                           <div className="py-12 text-center space-y-3">
                              <div className="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center mx-auto opacity-30">
                                 <Search className="w-6 h-6 text-white" />
@@ -484,22 +503,7 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                </div>
              )}
 
-             {fullScreenImage && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 animate-in fade-in duration-300">
-                    <button onClick={() => setFullScreenImage(null)} className="absolute top-6 right-6 p-3 bg-white/10 rounded-full hover:bg-white/20 text-white">
-                        <X className="w-6 h-6" />
-                    </button>
-                    <div className="text-white text-center">
-                        <div className="w-64 h-64 bg-slate-800 rounded-3xl flex items-center justify-center mb-4 border border-white/10">
-                            {fullScreenImage === 'selfie' && <User className="w-24 h-24 text-cyan-400" />}
-                            {fullScreenImage === 'id' && <ShieldCheck className="w-24 h-24 text-purple-400" />}
-                            {fullScreenImage === 'pop' && <Wallet className="w-24 h-24 text-emerald-400" />}
-                        </div>
-                        <h2 className="text-lg font-black uppercase tracking-widest">{fullScreenImage.toUpperCase()}</h2>
-                    </div>
-                </div>
-             )}
-
+             {/* SEEKERS TAB */}
              {isSeekers && (
                <div className="w-full max-w-xl px-6 space-y-6 animate-fade-in flex flex-col items-center text-center">
                  <div className="w-20 h-20 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-2">
@@ -520,6 +524,7 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                </div>
              )}
 
+             {/* AUTH TAB - Default to Signup Screen when clicked on Sign In */}
              {isAuth && (
                <div className="w-full max-w-md flex flex-col space-y-6 animate-fade-in px-8">
                   {authMessage ? (
@@ -643,10 +648,27 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
                </div>
              )}
 
-             {!isProfile && !isTenant && !isAuth && !isReferrals && !isSeekers && (
-               <div className="opacity-0">
-                 {/* Empty */}
-               </div>
+             {/* FULL SCREEN IMAGE VIEWER */}
+             {fullScreenImage && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4 animate-in fade-in duration-300">
+                    <button onClick={() => setFullScreenImage(null)} className="absolute top-6 right-6 p-3 bg-white/10 rounded-full hover:bg-white/20 text-white">
+                        <X className="w-6 h-6" />
+                    </button>
+                    <div className="text-white text-center flex flex-col items-center">
+                        <div className="max-w-md max-h-[70vh] bg-slate-800 rounded-3xl overflow-hidden flex items-center justify-center mb-4 border border-white/10 p-2">
+                            {fullScreenImage.startsWith('http') || fullScreenImage.startsWith('data:') ? (
+                              <img src={fullScreenImage} alt="Document" className="max-w-full max-h-[65vh] object-contain rounded-2xl" />
+                            ) : (
+                              <div className="w-64 h-64 flex flex-col items-center justify-center">
+                                {fullScreenImage === 'selfie' && <User className="w-24 h-24 text-cyan-400" />}
+                                {fullScreenImage === 'id' && <ShieldCheck className="w-24 h-24 text-purple-400" />}
+                                {fullScreenImage === 'pop' && <Wallet className="w-24 h-24 text-emerald-400" />}
+                              </div>
+                            )}
+                        </div>
+                        <h2 className="text-lg font-black uppercase tracking-widest">DOCUMENT VIEW</h2>
+                    </div>
+                </div>
              )}
         </div>
       </div>

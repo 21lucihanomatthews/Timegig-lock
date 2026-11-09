@@ -15,6 +15,9 @@ import { UserLocation, GeolocationStatus, TileLayerConfig } from './types/map';
 import { MAP_LAYERS } from './data/layers';
 import { reverseGeocode } from './utils/geo';
 import { ShieldAlert } from 'lucide-react';
+import { auth, db } from './lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -44,33 +47,40 @@ export default function App() {
   // Fallback notification for iframe permission blocks
   const [permissionErrorBanner, setPermissionErrorBanner] = useState<string | null>(null);
 
-  // Initial setup: Splash screen and Auth persistence
   useEffect(() => {
     // Splash screen timer
     const splashTimer = setTimeout(() => {
       setShowSplash(false);
     }, 5000);
 
-    // Load session
-    const savedUserEmail = localStorage.getItem('timegig_session');
-    if (savedUserEmail) {
-      setIsLoggedIn(true);
-      setUserEmail(savedUserEmail);
+    // Firebase Auth listener
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setIsLoggedIn(true);
+        setUserEmail(user.email || '');
 
-      // Check status
-      const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-      const user = users.find((u: any) => u.email === savedUserEmail);
-      const isMainAccount = savedUserEmail === 'timegig2026@gmail.com';
-      const status = isMainAccount ? 'active' : (user?.subscriptionStatus || 'none');
-      setSubscriptionStatus(status);
-
-      // If not active, force them to tenant tab immediately after splash
-      if (status !== 'active') {
-        setActiveTab('tenant');
+        // Fetch user status from Firestore
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const isMainAccount = user.email === 'timegig2026@gmail.com';
+          setSubscriptionStatus(isMainAccount ? 'active' : (userData.subscriptionStatus || 'none'));
+          
+          if (!isMainAccount && userData.subscriptionStatus !== 'active') {
+            setActiveTab('tenant');
+          }
+        }
+      } else {
+        setIsLoggedIn(false);
+        setUserEmail('');
+        setSubscriptionStatus('none');
       }
-    }
+    });
 
-    return () => clearTimeout(splashTimer);
+    return () => {
+      clearTimeout(splashTimer);
+      unsubscribe();
+    };
   }, []);
 
   /**
