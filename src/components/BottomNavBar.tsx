@@ -18,7 +18,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({ activeTab, onTabChan
   ].filter(item => item.id !== 'auth' || !isLoggedIn);
 
   return (
-    <div className="absolute bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 shadow-[0_-4px_20px_rgba(0,0,0,0.08)] pointer-events-auto">
+    <div className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 shadow-[0_-4px_20px_rgba(0,0,0,0.08)] pointer-events-auto">
       <nav className="max-w-3xl mx-auto flex items-center justify-around px-2 py-2">
         {navItems.map((item) => {
           const Icon = item.icon;
