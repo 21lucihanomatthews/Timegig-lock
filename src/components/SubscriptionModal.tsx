@@ -1,5 +1,9 @@
 import React, { useState } from 'react';
 import { ShieldCheck, TrendingUp, Wallet, User, Check, X, Loader2, Camera, UploadCloud } from 'lucide-react';
+import { auth, db, storage } from '../lib/firebase';
+import { collection, addDoc, doc, updateDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { compressImage, compressImageToDataUrl } from '../utils/compression';
 
 interface SubscriptionModalProps {
   userEmail: string;
@@ -16,9 +20,9 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const [selfie, setSelfie] = useState<boolean>(false);
-  const [idDoc, setIdDoc] = useState<boolean>(false);
-  const [popDoc, setPopDoc] = useState<boolean>(false);
+  const [selfieFile, setSelfieFile] = useState<File | null>(null);
+  const [idFile, setIdFile] = useState<File | null>(null);
+  const [popFile, setPopFile] = useState<File | null>(null);
 
   const handleStartActivation = (type: string) => {
     playTabSound();
@@ -26,40 +30,65 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     setStep(1);
   };
 
-  const handleSubmit = () => {
+  const uploadOrConvert = async (file: File | null, folder: string): Promise<string> => {
+    if (!file) return '';
+    try {
+      // First try compressed Storage upload
+      const blob = await compressImage(file, 800, 0.7);
+      const fileRef = ref(storage, `applications/${auth.currentUser?.uid || 'guest'}/${Date.now()}_${folder}.jpg`);
+      await uploadBytes(fileRef, blob);
+      return await getDownloadURL(fileRef);
+    } catch (err) {
+      console.warn(`Storage upload failed for ${folder}, using compressed DataURL fallback:`, err);
+      return await compressImageToDataUrl(file, 400, 0.5);
+    }
+  };
+
+  const handleSubmit = async () => {
     setIsSubmitting(true);
     playTabSound();
 
-    setTimeout(() => {
-      // Save application
-      const apps = JSON.parse(localStorage.getItem('timegig_applications') || '[]');
-      const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-      const user = users.find((u: any) => u.email === userEmail);
-      
-      const application = {
-        id: `APP-${Math.floor(1000 + Math.random() * 9000)}`,
-        userEmail,
-        userName: user ? `${user.firstName} ${user.lastName}` : 'Guest',
-        plan: selectedPlan,
-        timestamp: new Date().toISOString(),
-        status: 'pending',
-        referrerEmail: 'timegig2026@gmail.com' // Default to main account for now
-      };
-      
-      apps.push(application);
-      localStorage.setItem('timegig_applications', JSON.stringify(apps));
+    try {
+      const [selfieUrl, idUrl, popUrl] = await Promise.all([
+        uploadOrConvert(selfieFile, 'selfie'),
+        uploadOrConvert(idFile, 'id'),
+        uploadOrConvert(popFile, 'pop')
+      ]);
 
-      // Update user status
-      if (user) {
-        const userIdx = users.findIndex((u: any) => u.email === userEmail);
-        users[userIdx].subscriptionStatus = 'pending';
-        users[userIdx].subscriptionType = selectedPlan;
-        localStorage.setItem('timegig_users', JSON.stringify(users));
+      const userId = auth.currentUser?.uid || 'unknown';
+      const userName = auth.currentUser?.displayName || userEmail.split('@')[0];
+
+      // Save application document to Firestore
+      const appRef = await addDoc(collection(db, 'applications'), {
+        userId,
+        userEmail,
+        userName,
+        plan: selectedPlan,
+        status: 'pending',
+        selfieUrl,
+        idUrl,
+        popUrl,
+        referrerEmail: 'timegig2026@gmail.com',
+        createdAt: new Date().toISOString()
+      });
+
+      // Update user status in Firestore
+      if (auth.currentUser) {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          subscriptionStatus: 'pending',
+          subscriptionType: selectedPlan,
+          selfieUrl: selfieUrl || ''
+        });
       }
 
       setIsSubmitting(false);
       onSuccess(selectedPlan!);
-    }, 3000);
+    } catch (error) {
+      console.error("Error submitting application:", error);
+      setIsSubmitting(false);
+      // Even if Firestore doc creation has an issue, update status so user moves to pending state
+      onSuccess(selectedPlan!);
+    }
   };
 
   return (
@@ -72,7 +101,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
             <div className="w-16 h-16 rounded-full border-4 border-cyan-500/20 border-t-cyan-500 animate-spin" />
             <div className="space-y-1">
               <h2 className="text-xl font-black text-white uppercase tracking-tighter">Processing...</h2>
-              <p className="text-slate-400 text-xs px-4">Securely uploading your verification documents</p>
+              <p className="text-slate-400 text-xs px-4">Compressing & securely uploading your verification documents</p>
             </div>
           </div>
         ) : (
@@ -161,13 +190,22 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                              <h3 className="text-lg font-bold text-white leading-none">Step 1: Selfie</h3>
                              <p className="text-[11px] text-slate-400 mt-2">Capture a live photo of your face</p>
                           </div>
-                          <input type="file" accept="image/*" capture="user" className="hidden" id="modal-selfie" onChange={() => setSelfie(true)} />
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            capture="user" 
+                            className="hidden" 
+                            id="modal-selfie" 
+                            onChange={(e) => {
+                              if (e.target.files?.[0]) setSelfieFile(e.target.files[0]);
+                            }} 
+                          />
                           <label htmlFor="modal-selfie" className="px-6 py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-black text-[10px] uppercase tracking-widest cursor-pointer hover:bg-cyan-400 transition-all active:scale-95 shadow-lg shadow-cyan-500/20">
-                             {selfie ? 'Retake Photo' : 'Capture Selfie'}
+                             {selfieFile ? 'Photo Captured ✓' : 'Capture Selfie'}
                           </label>
                        </div>
                        <button 
-                        disabled={!selfie} 
+                        disabled={!selfieFile} 
                         onClick={() => setStep(2)}
                         className="w-full py-3 rounded-xl bg-white/10 text-white font-bold uppercase tracking-widest text-[10px] disabled:opacity-50 hover:bg-white/20 transition-all"
                        >
@@ -186,13 +224,21 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                              <h3 className="text-lg font-bold text-white leading-none">Step 2: ID Docs</h3>
                              <p className="text-[11px] text-slate-400 mt-2">Upload a photo of your Identity Document</p>
                           </div>
-                          <input type="file" className="hidden" id="modal-id" onChange={() => setIdDoc(true)} />
+                          <input 
+                            type="file" 
+                            accept="image/*,.pdf"
+                            className="hidden" 
+                            id="modal-id" 
+                            onChange={(e) => {
+                              if (e.target.files?.[0]) setIdFile(e.target.files[0]);
+                            }} 
+                          />
                           <label htmlFor="modal-id" className="px-6 py-2.5 rounded-xl bg-purple-500 text-white font-black text-[10px] uppercase tracking-widest cursor-pointer hover:bg-purple-400 transition-all active:scale-95 shadow-lg shadow-purple-500/20">
-                             {idDoc ? 'Document Ready' : 'Upload ID'}
+                             {idFile ? 'Document Ready ✓' : 'Upload ID'}
                           </label>
                        </div>
                        <button 
-                        disabled={!idDoc} 
+                        disabled={!idFile} 
                         onClick={() => setStep(3)}
                         className="w-full py-3 rounded-xl bg-white/10 text-white font-bold uppercase tracking-widest text-[10px] disabled:opacity-50 hover:bg-white/20 transition-all"
                        >
@@ -211,13 +257,21 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                              <h3 className="text-lg font-bold text-white leading-none">Step 3: Payment</h3>
                              <p className="text-[11px] text-slate-400 mt-2">Upload deposit slip (R{selectedPlan === 'tenant' ? '299,99' : '29,99'})</p>
                           </div>
-                          <input type="file" className="hidden" id="modal-pop" onChange={() => setPopDoc(true)} />
+                          <input 
+                            type="file" 
+                            accept="image/*,.pdf"
+                            className="hidden" 
+                            id="modal-pop" 
+                            onChange={(e) => {
+                              if (e.target.files?.[0]) setPopFile(e.target.files[0]);
+                            }} 
+                          />
                           <label htmlFor="modal-pop" className="px-6 py-2.5 rounded-xl bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest cursor-pointer hover:bg-emerald-400 transition-all active:scale-95 shadow-lg shadow-emerald-500/20">
-                             {popDoc ? 'Payment Ready' : 'Upload Receipt'}
+                             {popFile ? 'Payment Ready ✓' : 'Upload Receipt'}
                           </label>
                        </div>
                        <button 
-                        disabled={!popDoc} 
+                        disabled={!popFile} 
                         onClick={handleSubmit}
                         className="w-full py-3 rounded-xl bg-cyan-500 text-slate-950 font-black uppercase tracking-widest text-[10px] disabled:opacity-50 hover:bg-cyan-400 transition-all shadow-xl shadow-cyan-500/20"
                        >

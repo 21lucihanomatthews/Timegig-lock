@@ -16,8 +16,8 @@ import { MAP_LAYERS } from './data/layers';
 import { reverseGeocode } from './utils/geo';
 import { ShieldAlert } from 'lucide-react';
 import { auth, db } from './lib/firebase';
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -53,22 +53,38 @@ export default function App() {
       setShowSplash(false);
     }, 5000);
 
-    // Firebase Auth listener
+    // Firebase Auth listener - handles session persistence across reloads
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         setIsLoggedIn(true);
         setUserEmail(user.email || '');
 
-        // Fetch user status from Firestore
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          const isMainAccount = user.email === 'timegig2026@gmail.com';
-          setSubscriptionStatus(isMainAccount ? 'active' : (userData.subscriptionStatus || 'none'));
-          
-          if (!isMainAccount && userData.subscriptionStatus !== 'active') {
-            setActiveTab('tenant');
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            const isMainAccount = user.email === 'timegig2026@gmail.com';
+            const status = isMainAccount ? 'active' : (userData.subscriptionStatus || 'none');
+            setSubscriptionStatus(status);
+            
+            if (!isMainAccount && status !== 'active') {
+              setActiveTab('tenant');
+            }
+          } else {
+            const isMainAccount = user.email === 'timegig2026@gmail.com';
+            await setDoc(doc(db, 'users', user.uid), {
+              email: user.email,
+              hasSubscribed: isMainAccount,
+              subscriptionStatus: isMainAccount ? 'active' : 'none',
+              registrationDate: new Date().toISOString()
+            }, { merge: true });
+            setSubscriptionStatus(isMainAccount ? 'active' : 'none');
+            if (!isMainAccount) setActiveTab('tenant');
           }
+        } catch (err) {
+          console.error("Error loading user profile:", err);
+          const isMainAccount = user.email === 'timegig2026@gmail.com';
+          setSubscriptionStatus(isMainAccount ? 'active' : 'none');
         }
       } else {
         setIsLoggedIn(false);
@@ -287,14 +303,8 @@ export default function App() {
 
     // If logged in but not active, force them to stay in tenant or profile (for logout)
     if (isLoggedIn) {
-      // Re-read status to be sure
-      const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-      const user = users.find((u: any) => u.email === userEmail);
       const isMainAccount = userEmail === 'timegig2026@gmail.com';
-      const status = isMainAccount ? 'active' : (user?.subscriptionStatus || 'none');
-      
-      if (status !== 'active') {
-        // Only allow switching between 'tenant' and 'profile' (for logout/settings)
+      if (!isMainAccount && subscriptionStatus !== 'active') {
         if (tab === 'profile' || tab === 'tenant') {
            setActiveTab(tab);
         } else {
@@ -310,28 +320,24 @@ export default function App() {
   const handleAuthSuccess = (email: string, redirectTab: string | null) => {
     setIsLoggedIn(true);
     setUserEmail(email);
-    localStorage.setItem('timegig_session', email);
 
-    // Initial check of status
-    const users = JSON.parse(localStorage.getItem('timegig_users') || '[]');
-    const user = users.find((u: any) => u.email === email);
     const isMainAccount = email === 'timegig2026@gmail.com';
-    const status = isMainAccount ? 'active' : (user?.subscriptionStatus || 'none');
-    setSubscriptionStatus(status);
-
-    // If not active, always redirect to tenant regardless of the requested tab
-    if (status !== 'active') {
+    if (!isMainAccount && subscriptionStatus !== 'active') {
       setActiveTab('tenant');
     } else {
       setActiveTab(redirectTab);
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error("Sign out error:", e);
+    }
     setIsLoggedIn(false);
     setUserEmail('');
     setSubscriptionStatus('none');
-    localStorage.removeItem('timegig_session');
     setActiveTab(null);
   };
 
@@ -442,7 +448,6 @@ export default function App() {
           playTabSound={playTabSound}
           onSuccess={(type) => {
             setSubscriptionStatus('pending');
-            // Status will be 'pending' in App state, modal will disappear
           }}
         />
       )}

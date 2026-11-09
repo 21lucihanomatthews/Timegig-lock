@@ -189,6 +189,28 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const getFriendlyErrorMessage = (error: any): string => {
+    const code = error?.code || '';
+    switch (code) {
+      case 'auth/email-already-in-use':
+        return 'An account with this email address already exists. Please log in instead.';
+      case 'auth/invalid-credential':
+      case 'auth/wrong-password':
+      case 'auth/user-not-found':
+        return 'Invalid email or password. Please check your credentials and try again.';
+      case 'auth/weak-password':
+        return 'Password should be at least 6 characters long.';
+      case 'auth/invalid-email':
+        return 'Please enter a valid email address.';
+      case 'auth/too-many-requests':
+        return 'Access to this account has been temporarily disabled due to many failed login attempts. Please try again later.';
+      case 'auth/network-request-failed':
+        return 'Network error. Please check your internet connection.';
+      default:
+        return error?.message?.replace(/^Firebase:\s*/, '') || 'Authentication failed. Please try again.';
+    }
+  };
+
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsError(false);
@@ -198,6 +220,12 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
         if (!acceptedTerms) {
           setIsError(true);
           setAuthMessage("Please accept the terms and conditions.");
+          return;
+        }
+
+        if (password.length < 6) {
+          setIsError(true);
+          setAuthMessage("Password must be at least 6 characters long.");
           return;
         }
 
@@ -215,22 +243,22 @@ export const FeatureView: React.FC<FeatureViewProps> = ({
           registrationDate: new Date().toISOString()
         });
 
-        setAuthMessage(`Congratulations! Your account (${email}) has been created.`);
+        setAuthMessage(`Account created successfully for ${email}.`);
         setTimeout(() => {
           setAuthMessage(null);
           onAuthSuccess(email, isMainAccount ? 'gigs' : 'tenant');
-        }, 2000);
+        }, 1500);
       } else {
         await signInWithEmailAndPassword(auth, email, password);
         setAuthMessage(`Welcome back!`);
         setTimeout(() => {
           onAuthSuccess(email, null);
           setAuthMessage(null);
-        }, 1500);
+        }, 1200);
       }
     } catch (error: any) {
       setIsError(true);
-      setAuthMessage(error.message || "Authentication failed.");
+      setAuthMessage(getFriendlyErrorMessage(error));
     }
   };
 
