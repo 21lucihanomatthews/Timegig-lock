@@ -17,7 +17,7 @@ export const MapControls: React.FC<MapControlsProps> = ({
   isSatellite,
 }) => {
   return (
-    <div className="absolute bottom-20 right-6 z-30 flex flex-col gap-2.5 pointer-events-auto">
+    <div className="absolute bottom-32 right-6 z-30 flex flex-col gap-2.5 pointer-events-auto">
       {/* Locate Me Bubble */}
       <button
         type="button"
